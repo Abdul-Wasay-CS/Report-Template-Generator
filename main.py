@@ -2,11 +2,17 @@
 main.py - DLD Lab Word Template Generator
 
 A single-window Tkinter (ttk) desktop app that walks the user through three steps:
-    Step 1: choose how many headings the report needs (1-100)
-    Step 2: type a title for each heading, one at a time
-    Step 3: generate a .docx by copying cover_page/cover.docx and appending, for every
-            heading: a "Heading 1" paragraph, 5 empty screenshot-placeholder lines and a
-            5x3 truth-table (A | B | X).
+    Step 1: choose how many ADDITIONAL headings the report needs (1-100). These come
+            after the 3 fixed headings that every report contains.
+    Step 2: type a title for each additional heading, one at a time
+    Step 3: generate a .docx by copying cover_page/cover.docx and appending, in order:
+              - the 3 fixed headings (Critical Analysis, Summary of the skills learned,
+                Conclusion), then
+              - the user's additional headings.
+            Every heading gets a "Heading 1" paragraph, 5 empty screenshot-placeholder
+            lines and a 5x3 truth-table (A | B | X). The first heading starts on a new
+            page (page 2) so nothing shares the cover page.
+            After a successful save the app closes itself; on failure it stays open.
 
 Dependencies: python-docx, tkinter (with ttk).
 """
@@ -55,9 +61,23 @@ BASE_DIR = Path(__file__).resolve().parent
 COVER_PATH = BASE_DIR / "cover_page" / "cover.docx"
 COVER_DISPLAY = "cover_page/cover.docx"      # short form used in messages
 
-# Allowed range for the number of headings.
+# Headings that appear at the start of EVERY generated document, in this exact order,
+# before any heading typed by the user. They get the same treatment as user headings.
+FIXED_HEADINGS = [
+    "Critical Analysis",
+    "Summary of the skills learned",
+    "Conclusion",
+]
+
+# Allowed range for the number of ADDITIONAL (user-defined) headings. The fixed
+# headings above are not counted here.
 MIN_HEADINGS = 1
 MAX_HEADINGS = 100
+
+# After a successful save, the window closes after this many milliseconds. The short
+# delay lets the "Saved: <path>" status message actually be drawn before the window
+# disappears. Set to 0 to close immediately.
+AUTO_CLOSE_DELAY_MS = 1500
 
 # Paragraph style used for each heading.
 HEADING_STYLE = "Heading 1"
@@ -191,16 +211,22 @@ def apply_font(paragraph, font_name, size_pt) -> None:
             run.font.size = Pt(size_pt)
 
 
-def add_heading_block(doc, title: str) -> None:
+def add_heading_block(doc, title: str, start_on_new_page: bool = False) -> None:
     """
     Append one complete section to the document:
         1. heading paragraph
         2. SCREENSHOT_PLACEHOLDER_COUNT empty paragraphs
         3. a table built from TABLE_ROWS
+
+    start_on_new_page: when True the heading paragraph gets Word's "Page break before"
+    property. Used for the very first heading so it always begins on page 2, with
+    nothing (not even an empty paragraph) added to the cover page itself.
     """
     # 1. Heading paragraph in the configured style.
     heading = doc.add_paragraph(title, style=HEADING_STYLE)
     apply_font(heading, HEADING_FONT_NAME, HEADING_FONT_SIZE_PT)
+    if start_on_new_page:
+        heading.paragraph_format.page_break_before = True
 
     # 2. Empty lines where the student pastes screenshots.
     for _ in range(SCREENSHOT_PLACEHOLDER_COUNT):
@@ -217,8 +243,12 @@ def add_heading_block(doc, title: str) -> None:
                 apply_font(paragraph, TABLE_FONT_NAME, TABLE_FONT_SIZE_PT)
 
 
-def build_document_content(doc, titles: list[str]) -> None:
-    """Validate the table configuration, then append one block per heading, in order."""
+def build_document_content(doc, user_titles: list[str]) -> None:
+    """
+    Validate the table configuration, then append one block per heading, in order:
+    first the FIXED_HEADINGS, then the user's additional headings.
+    The first block starts on a new page so the cover page stays clean.
+    """
     columns = len(TABLE_ROWS[0]) if TABLE_ROWS else 0
     if columns == 0 or any(len(row) != columns for row in TABLE_ROWS):
         raise GenerationError(
@@ -226,8 +256,11 @@ def build_document_content(doc, titles: list[str]) -> None:
             "row must have the same number of cells."
         )
     ensure_heading_style(doc)
-    for title in titles:
-        add_heading_block(doc, title)
+
+    # Total output = fixed headings + user headings.
+    all_titles = list(FIXED_HEADINGS) + list(user_titles)
+    for position, title in enumerate(all_titles):
+        add_heading_block(doc, title, start_on_new_page=(position == 0))
 
 
 def _remove_quietly(path: str) -> None:
@@ -238,9 +271,12 @@ def _remove_quietly(path: str) -> None:
         pass
 
 
-def generate_document(out_path: str, titles: list[str]) -> None:
+def generate_document(out_path: str, user_titles: list[str]) -> None:
     """
     Create the report template at out_path.
+
+    user_titles are the ADDITIONAL headings typed in Step 2; the fixed headings are
+    added automatically in front of them.
 
     Steps: check the cover exists -> shutil.copy it to out_path -> open the copy with
     python-docx -> append the heading blocks -> save.
@@ -280,8 +316,8 @@ def generate_document(out_path: str, titles: list[str]) -> None:
                 f".docx file ({type(exc).__name__}: {exc})."
             ) from exc
 
-        # Append the per-heading content.
-        build_document_content(doc, titles)
+        # Append the per-heading content (fixed headings first, then the user's).
+        build_document_content(doc, user_titles)
 
         # Save in place.
         try:
@@ -301,7 +337,7 @@ def generate_document(out_path: str, titles: list[str]) -> None:
 
 def parse_heading_count(text: str):
     """
-    Validate the Step 1 input.
+    Validate the Step 1 input (number of additional headings).
     Returns (value, None) when valid, or (None, warning_message) when invalid.
     Only plain ASCII digits are accepted: no signs, decimals, spaces inside, or letters.
     """
@@ -330,10 +366,11 @@ class App:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.heading_count = None          # int once Step 1 has been passed
-        self.titles: list[str] = []        # one entry per heading ("" = not entered yet)
-        self.current_index = 0             # 0-based heading being edited in Step 2
+        self.heading_count = None          # int once Step 1 has been passed (user headings only)
+        self.titles: list[str] = []        # one entry per user heading ("" = not entered yet)
+        self.current_index = 0             # 0-based user heading being edited in Step 2
         self.fatal = False                 # True when a start-up error stopped the app
+        self.step3_buttons: list = []      # Step 3 buttons, disabled while auto-closing
 
         # Window setup: resizable, with a sensible minimum size.
         root.title("DLD Lab Word Template Generator")
@@ -389,7 +426,24 @@ class App:
         """Destroy the widgets of the current step and clear the status line."""
         for child in self.content.winfo_children():
             child.destroy()
+        self.step3_buttons = []
         self.set_status("")
+
+    def _add_wrapping_label(self, text: str, row: int, foreground: str = "") -> ttk.Label:
+        """
+        Create a left-aligned label whose text re-wraps to the width of the window.
+        Used for longer texts (Step 1 prompt, fatal error message).
+        """
+        options = {"text": text, "justify": "left"}
+        if foreground:
+            options["foreground"] = foreground
+        label = ttk.Label(self.content, **options)
+        label.grid(row=row, column=0, sticky="ew")
+        label.bind(
+            "<Configure>",
+            lambda event: label.configure(wraplength=max(event.width - 10, 100)),
+        )
+        return label
 
     def _add_warning_label(self, row: int) -> tk.StringVar:
         """Create an (initially empty) red inline-warning label and return its variable."""
@@ -420,9 +474,7 @@ class App:
         self.fatal = True
         sys.stderr.write(f"ERROR: {message}\n")
         self._reset_content()
-        label = ttk.Label(self.content, text=message, foreground=ERROR_COLOR, justify="left")
-        label.grid(row=0, column=0, sticky="ew")
-        label.bind("<Configure>", lambda event: label.configure(wraplength=max(event.width - 10, 100)))
+        self._add_wrapping_label(message, row=0, foreground=ERROR_COLOR)
         exit_button, = self._add_buttons([("Exit", self.root.destroy)])
         exit_button.focus_set()
         self.set_status("Fatal error - the application cannot continue. Click Exit to close.", "error")
@@ -430,9 +482,12 @@ class App:
     # ------------------------------------------------------------------ Step 1 -------
 
     def show_step1(self) -> None:
-        """Step 1: ask for the number of headings (integer 1-100)."""
+        """Step 1: ask for the number of ADDITIONAL headings (integer 1-100)."""
         self._reset_content()
-        ttk.Label(self.content, text="Number of headings:").grid(row=0, column=0, sticky="w")
+        self._add_wrapping_label(
+            f"Number of additional headings (after the {len(FIXED_HEADINGS)} fixed ones):",
+            row=0,
+        )
 
         # Pre-fill with the stored count when returning from Step 2 ("preserve if valid").
         initial = str(self.heading_count) if self.heading_count else str(MIN_HEADINGS)
@@ -484,7 +539,7 @@ class App:
     # ------------------------------------------------------------------ Step 2 -------
 
     def show_step2(self) -> None:
-        """Step 2: ask for the title of heading number current_index+1."""
+        """Step 2: ask for the title of user heading number current_index+1 (of N)."""
         self._reset_content()
         total = self.heading_count
         index = self.current_index
@@ -527,24 +582,46 @@ class App:
     # ------------------------------------------------------------------ Step 3 -------
 
     def show_step3(self) -> None:
-        """Step 3: summary + Generate button."""
+        """Step 3: summary (additional / fixed / total headings) + Generate button."""
         self._reset_content()
-        ttk.Label(
-            self.content, text=f"Number of headings: {self.heading_count}"
-        ).grid(row=0, column=0, sticky="w")
+        fixed = len(FIXED_HEADINGS)
+        summary = (
+            f"Number of additional headings: {self.heading_count}\n"
+            f"Fixed headings: {fixed}\n"
+            f"Total headings in the document: {fixed + self.heading_count}"
+        )
+        ttk.Label(self.content, text=summary, justify="left").grid(row=0, column=0, sticky="w")
 
-        _back, generate_button = self._add_buttons(
+        back_button, generate_button = self._add_buttons(
             [("Back", self.on_step3_back), ("Generate", self.on_generate)]
         )
+        self.step3_buttons = [back_button, generate_button]
         generate_button.focus_set()
 
     def on_step3_back(self) -> None:
-        """Return to Step 2 at the last heading."""
+        """Return to Step 2 at the last user heading."""
         self.current_index = self.heading_count - 1
         self.show_step2()
 
+    def schedule_auto_close(self) -> None:
+        """
+        Close the application after a successful save. The buttons are disabled first
+        so nothing can be clicked while the (short) delay runs; the delay itself lets
+        the success message be drawn before the window goes away.
+        """
+        for button in self.step3_buttons:
+            button.state(["disabled"])
+        self.root.update_idletasks()               # make sure the status text is painted
+        if AUTO_CLOSE_DELAY_MS <= 0:
+            self.root.destroy()
+        else:
+            self.root.after(AUTO_CLOSE_DELAY_MS, self.root.destroy)
+
     def on_generate(self) -> None:
-        """Ask where to save, build the document, and report the result in the status label."""
+        """
+        Ask where to save, build the document, and report the result in the status label.
+        On success the app then closes itself; on failure the window stays open.
+        """
         out_path = filedialog.asksaveasfilename(
             parent=self.root,
             title="Save Word document",
@@ -563,11 +640,12 @@ class App:
         try:
             generate_document(out_path, self.titles)
         except GenerationError as exc:
-            self.set_status(str(exc), "error")
-        except Exception as exc:               # anything we did not anticipate
+            self.set_status(str(exc), "error")     # stay open so the error can be read
+        except Exception as exc:                   # anything we did not anticipate
             self.set_status(f"Unexpected error ({type(exc).__name__}): {exc}", "error")
         else:
             self.set_status(f"Saved: {out_path}", "ok")
+            self.schedule_auto_close()
 
 
 # ======================================================================================
