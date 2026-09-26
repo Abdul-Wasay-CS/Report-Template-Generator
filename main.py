@@ -2,16 +2,18 @@
 main.py - DLD Lab Word Template Generator
 
 A single-window Tkinter (ttk) desktop app that walks the user through three steps:
-    Step 1: choose how many ADDITIONAL headings the report needs (1-100). These come
-            after the 3 fixed headings that every report contains.
+    Step 1: choose how many ADDITIONAL (gate) headings the report needs (1-100). These
+            come after the 3 fixed headings that every report contains.
     Step 2: type a title for each additional heading, one at a time
     Step 3: generate a .docx by copying cover_page/cover.docx and appending, in order:
-              - the 3 fixed headings (Critical Analysis, Summary of the skills learned,
-                Conclusion), then
-              - the user's additional headings.
-            Every heading gets a "Heading 1" paragraph, 5 empty screenshot-placeholder
-            lines and a 5x3 truth-table (A | B | X). The first heading starts on a new
-            page (page 2) so nothing shares the cover page.
+              - the 3 FIXED headings (Critical Analysis, Summary of the skills learned,
+                Conclusion) - each gets only a heading paragraph + 5 screenshot
+                placeholder lines. NO table.
+              - the user's additional ("gate") headings - each gets a heading
+                paragraph + 5 screenshot placeholder lines + a 5x3 A/B/X table.
+            The first heading starts on a new page (page 2) so nothing shares the
+            cover page. Specific fonts/sizes are applied to fixed headings, gate
+            headings, body placeholder text, and table content (see CONFIGURATION).
             After a successful save the app closes itself; on failure it stays open.
 
 Dependencies: python-docx, tkinter (with ttk).
@@ -62,15 +64,16 @@ COVER_PATH = BASE_DIR / "cover_page" / "cover.docx"
 COVER_DISPLAY = "cover_page/cover.docx"      # short form used in messages
 
 # Headings that appear at the start of EVERY generated document, in this exact order,
-# before any heading typed by the user. They get the same treatment as user headings.
+# before any heading typed by the user. Unlike user headings, these get NO table -
+# only the heading paragraph and the screenshot placeholder lines.
 FIXED_HEADINGS = [
     "Critical Analysis",
     "Summary of the skills learned",
     "Conclusion",
 ]
 
-# Allowed range for the number of ADDITIONAL (user-defined) headings. The fixed
-# headings above are not counted here.
+# Allowed range for the number of ADDITIONAL (user-defined / "gate") headings. The
+# fixed headings above are not counted here.
 MIN_HEADINGS = 1
 MAX_HEADINGS = 100
 
@@ -79,21 +82,35 @@ MAX_HEADINGS = 100
 # disappears. Set to 0 to close immediately.
 AUTO_CLOSE_DELAY_MS = 1500
 
-# Paragraph style used for each heading.
+# Paragraph style used for every heading (fixed and user). Font/size overrides for each
+# kind of heading are applied on top of this style - see the two blocks below.
 HEADING_STYLE = "Heading 1"
-# Optional font overrides for heading text (None = keep whatever the style defines).
-HEADING_FONT_NAME = None          # e.g. "Times New Roman"
-HEADING_FONT_SIZE_PT = None       # e.g. 14
 
-# Number of empty paragraphs inserted under each heading for screenshots.
+# --- Formatting: the 3 fixed ("main") headings ----------------------------------------
+FIXED_HEADING_FONT_NAME = "Aptos Slab Extrabold"
+FIXED_HEADING_FONT_SIZE_PT = 18
+FIXED_HEADING_BOLD = None          # None = no override; use the style's own weight
+
+# --- Formatting: user-defined ("gate") headings ----------------------------------------
+GATE_HEADING_FONT_NAME = "Berlin Sans FB Demi"
+GATE_HEADING_FONT_SIZE_PT = 28
+GATE_HEADING_BOLD = True
+
+# --- Formatting: body text (the screenshot placeholder lines, under every heading) ----
+BODY_FONT_NAME = "Calibri (Body)"
+BODY_FONT_SIZE_PT = 12
+
+# Number of empty, body-formatted paragraphs inserted under each heading for screenshots.
 SCREENSHOT_PLACEHOLDER_COUNT = 5
 
+# --- Formatting: table content (both the header row and the value rows) --------------
+TABLE_FONT_NAME = "Times New Roman"
+TABLE_FONT_SIZE_PT = 20
+
 # Table style name. Must exist in cover.docx; if it does not, plain black borders are
-# drawn instead. Use None for "no style, no borders".
+# drawn instead. Use None for "no style, no borders". Applies only to user ("gate")
+# headings - fixed headings never get a table.
 TABLE_STYLE = "Table Grid"
-# Optional font overrides for table text (None = keep document default).
-TABLE_FONT_NAME = None
-TABLE_FONT_SIZE_PT = None
 
 # Table contents: first row is the header, remaining rows are the A/B presets with an
 # empty X column to be filled in by the student. Table dimensions are derived from this
@@ -106,7 +123,16 @@ TABLE_ROWS = [
     ["1", "1", ""],
 ]
 
-# Colours for inline warnings / status messages.
+# --- GUI color theme (ttk "clam" base, customised) -------------------------------------
+COLOR_BG = "#eef3f8"            # window / frame background
+COLOR_CARD_BG = "#ffffff"       # entry / spinbox field background
+COLOR_TEXT = "#1b2733"          # normal label text
+COLOR_PRIMARY = "#2f6690"       # buttons, progress bar
+COLOR_PRIMARY_DARK = "#1b4964"  # buttons when pressed/active
+COLOR_PRIMARY_TEXT = "#ffffff"  # text on top of COLOR_PRIMARY
+
+# Colours for inline warnings / status messages (kept distinct from the theme so
+# errors/success remain readable regardless of the palette above).
 ERROR_COLOR = "#b00020"
 OK_COLOR = "#1b5e20"
 
@@ -144,7 +170,8 @@ def ensure_heading_style(doc) -> None:
     Word only stores a style like "Heading 1" in a file once it has been used or
     modified, so a plain cover.docx may not contain it. If it is missing we create a
     simple built-in-style replacement (bold, 16 pt, outline level 1) so headings still
-    appear in Word's Navigation Pane. If it exists, nothing is changed.
+    appear in Word's Navigation Pane. The per-kind font overrides below are applied on
+    top of whichever style ends up in effect, so this fallback rarely matters visually.
     """
     styles = doc.styles
     try:
@@ -202,52 +229,70 @@ def apply_table_style(table) -> None:
         add_manual_borders(table)
 
 
-def apply_font(paragraph, font_name, size_pt) -> None:
-    """Override font name/size on every run of a paragraph (only when values are set)."""
+def apply_font_to_run(run, font_name, size_pt, bold=None) -> None:
+    """Set name/size/bold on a single run. Each argument is skipped when falsy/None."""
+    if font_name:
+        run.font.name = font_name
+    if size_pt:
+        run.font.size = Pt(size_pt)
+    if bold is not None:
+        run.font.bold = bold
+
+
+def apply_font(paragraph, font_name, size_pt, bold=None) -> None:
+    """Apply the same name/size/bold override to every run already in a paragraph."""
     for run in paragraph.runs:
-        if font_name:
-            run.font.name = font_name
-        if size_pt:
-            run.font.size = Pt(size_pt)
+        apply_font_to_run(run, font_name, size_pt, bold)
 
 
-def add_heading_block(doc, title: str, start_on_new_page: bool = False) -> None:
+def add_heading_block(doc, title: str, is_fixed: bool, start_on_new_page: bool = False) -> None:
     """
-    Append one complete section to the document:
-        1. heading paragraph
-        2. SCREENSHOT_PLACEHOLDER_COUNT empty paragraphs
-        3. a table built from TABLE_ROWS
+    Append one complete section to the document.
+
+    Fixed headings (is_fixed=True): heading paragraph + screenshot placeholder lines.
+        NO table.
+    User / "gate" headings (is_fixed=False): heading paragraph + screenshot placeholder
+        lines + a 5x3 A/B/X table.
 
     start_on_new_page: when True the heading paragraph gets Word's "Page break before"
     property. Used for the very first heading so it always begins on page 2, with
     nothing (not even an empty paragraph) added to the cover page itself.
     """
-    # 1. Heading paragraph in the configured style.
+    # 1. Heading paragraph in the configured style, with the font that matches its kind.
     heading = doc.add_paragraph(title, style=HEADING_STYLE)
-    apply_font(heading, HEADING_FONT_NAME, HEADING_FONT_SIZE_PT)
+    if is_fixed:
+        apply_font(heading, FIXED_HEADING_FONT_NAME, FIXED_HEADING_FONT_SIZE_PT, FIXED_HEADING_BOLD)
+    else:
+        apply_font(heading, GATE_HEADING_FONT_NAME, GATE_HEADING_FONT_SIZE_PT, GATE_HEADING_BOLD)
     if start_on_new_page:
         heading.paragraph_format.page_break_before = True
 
-    # 2. Empty lines where the student pastes screenshots.
+    # 2. Empty, body-formatted lines where the student pastes screenshots. An empty run
+    # is added explicitly (add_paragraph() with no text creates no run at all) so the
+    # body font is actually attached to the line.
     for _ in range(SCREENSHOT_PLACEHOLDER_COUNT):
-        doc.add_paragraph("")
+        placeholder = doc.add_paragraph()
+        run = placeholder.add_run("")
+        apply_font_to_run(run, BODY_FONT_NAME, BODY_FONT_SIZE_PT)
 
-    # 3. Truth table.
-    table = doc.add_table(rows=len(TABLE_ROWS), cols=len(TABLE_ROWS[0]))
-    apply_table_style(table)
-    for r_index, row_values in enumerate(TABLE_ROWS):
-        for c_index, value in enumerate(row_values):
-            cell = table.cell(r_index, c_index)
-            cell.text = value
-            for paragraph in cell.paragraphs:
-                apply_font(paragraph, TABLE_FONT_NAME, TABLE_FONT_SIZE_PT)
+    # 3. Truth table - user ("gate") headings only.
+    if not is_fixed:
+        table = doc.add_table(rows=len(TABLE_ROWS), cols=len(TABLE_ROWS[0]))
+        apply_table_style(table)
+        for r_index, row_values in enumerate(TABLE_ROWS):
+            for c_index, value in enumerate(row_values):
+                cell = table.cell(r_index, c_index)
+                cell.text = value
+                for paragraph in cell.paragraphs:
+                    apply_font(paragraph, TABLE_FONT_NAME, TABLE_FONT_SIZE_PT)
 
 
 def build_document_content(doc, user_titles: list[str]) -> None:
     """
     Validate the table configuration, then append one block per heading, in order:
-    first the FIXED_HEADINGS, then the user's additional headings.
-    The first block starts on a new page so the cover page stays clean.
+    first the FIXED_HEADINGS (no table), then the user's additional "gate" headings
+    (each with a table). The first block starts on a new page so the cover page stays
+    clean.
     """
     columns = len(TABLE_ROWS[0]) if TABLE_ROWS else 0
     if columns == 0 or any(len(row) != columns for row in TABLE_ROWS):
@@ -257,10 +302,14 @@ def build_document_content(doc, user_titles: list[str]) -> None:
         )
     ensure_heading_style(doc)
 
-    # Total output = fixed headings + user headings.
+    fixed_count = len(FIXED_HEADINGS)
     all_titles = list(FIXED_HEADINGS) + list(user_titles)
     for position, title in enumerate(all_titles):
-        add_heading_block(doc, title, start_on_new_page=(position == 0))
+        add_heading_block(
+            doc, title,
+            is_fixed=(position < fixed_count),
+            start_on_new_page=(position == 0),
+        )
 
 
 def _remove_quietly(path: str) -> None:
@@ -275,8 +324,8 @@ def generate_document(out_path: str, user_titles: list[str]) -> None:
     """
     Create the report template at out_path.
 
-    user_titles are the ADDITIONAL headings typed in Step 2; the fixed headings are
-    added automatically in front of them.
+    user_titles are the ADDITIONAL ("gate") headings typed in Step 2; the fixed
+    headings are added automatically in front of them.
 
     Steps: check the cover exists -> shutil.copy it to out_path -> open the copy with
     python-docx -> append the heading blocks -> save.
@@ -358,10 +407,13 @@ def parse_heading_count(text: str):
 # GUI
 # ======================================================================================
 
+TOTAL_STEPS = 3  # used only for the "Step X of 3" progress label
+
+
 class App:
     """
     Single-window wizard. The top area ("content") is cleared and rebuilt for each step;
-    the bottom status label is created once and lives for the whole session.
+    a persistent progress label sits above it and a persistent status label sits below.
     """
 
     def __init__(self, root: tk.Tk) -> None:
@@ -374,21 +426,31 @@ class App:
 
         # Window setup: resizable, with a sensible minimum size.
         root.title("DLD Lab Word Template Generator")
-        root.geometry("560x280")
-        root.minsize(440, 240)
+        root.geometry("560x300")
+        root.minsize(440, 260)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=1)     # content area grows, status stays at the bottom
+        root.rowconfigure(1, weight=1)     # content area grows; progress/separator/status don't
+        root.configure(background=COLOR_BG)
+
+        self._apply_theme()
+
+        # Persistent progress indicator ("Step X of 3"), above the content area.
+        self.progress_var = tk.StringVar(value="")
+        self.progress_label = ttk.Label(
+            root, textvariable=self.progress_var, style="Progress.TLabel", anchor="w"
+        )
+        self.progress_label.grid(row=0, column=0, sticky="ew")
 
         # Content area (swapped per step).
         self.content = ttk.Frame(root, padding=16)
-        self.content.grid(row=0, column=0, sticky="nsew")
+        self.content.grid(row=1, column=0, sticky="nsew")
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(9, weight=1)   # spacer row pushes buttons (row 10) down
 
         # Separator + single status label at the bottom of the window.
-        ttk.Separator(root, orient="horizontal").grid(row=1, column=0, sticky="ew")
+        ttk.Separator(root, orient="horizontal").grid(row=2, column=0, sticky="ew")
         self.status_label = ttk.Label(root, text="", anchor="w", justify="left", padding=(16, 6))
-        self.status_label.grid(row=2, column=0, sticky="ew")
+        self.status_label.grid(row=3, column=0, sticky="ew")
         # Keep the status text wrapped to the current window width (long paths/errors).
         self.status_label.bind(
             "<Configure>",
@@ -401,6 +463,44 @@ class App:
             self.show_fatal(problem)
         else:
             self.show_step1()
+
+    # ---------------------------------------------------------------- theming ---------
+
+    def _apply_theme(self) -> None:
+        """
+        Set up a single, consistent color palette (a soft blue/steel theme) across every
+        ttk widget in the app. Uses the built-in 'clam' theme as a base because it is the
+        most reliable one to recolor consistently across Windows/macOS/Linux.
+        """
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass  # 'clam' should always be available; if not, keep the platform default
+
+        style.configure(".", background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure("TFrame", background=COLOR_BG)
+        style.configure("TLabel", background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure("TSeparator", background=COLOR_PRIMARY)
+
+        style.configure(
+            "TButton", background=COLOR_PRIMARY, foreground=COLOR_PRIMARY_TEXT,
+            padding=(12, 6), borderwidth=0, focusthickness=3, focuscolor=COLOR_PRIMARY_DARK,
+        )
+        style.map(
+            "TButton",
+            background=[("active", COLOR_PRIMARY_DARK), ("disabled", "#a9b7c4")],
+            foreground=[("disabled", "#e7edf3")],
+        )
+
+        style.configure("TEntry", fieldbackground=COLOR_CARD_BG, foreground=COLOR_TEXT)
+        style.configure("TSpinbox", fieldbackground=COLOR_CARD_BG, foreground=COLOR_TEXT)
+
+        # The progress bar/label at the very top of the window: solid accent background.
+        style.configure(
+            "Progress.TLabel", background=COLOR_PRIMARY, foreground=COLOR_PRIMARY_TEXT,
+            padding=(16, 8), font=("TkDefaultFont", 10, "bold"),
+        )
 
     # ---------------------------------------------------------------- helpers ---------
 
@@ -419,7 +519,7 @@ class App:
 
     def set_status(self, text: str, kind: str = "") -> None:
         """Update the bottom status label. kind: 'error', 'ok' or '' (neutral)."""
-        color = {"error": ERROR_COLOR, "ok": OK_COLOR}.get(kind, "")
+        color = {"error": ERROR_COLOR, "ok": OK_COLOR}.get(kind, COLOR_TEXT)
         self.status_label.configure(text=text, foreground=color)
 
     def _reset_content(self) -> None:
@@ -473,6 +573,7 @@ class App:
         """
         self.fatal = True
         sys.stderr.write(f"ERROR: {message}\n")
+        self.progress_var.set("Setup Error")
         self._reset_content()
         self._add_wrapping_label(message, row=0, foreground=ERROR_COLOR)
         exit_button, = self._add_buttons([("Exit", self.root.destroy)])
@@ -483,6 +584,7 @@ class App:
 
     def show_step1(self) -> None:
         """Step 1: ask for the number of ADDITIONAL headings (integer 1-100)."""
+        self.progress_var.set(f"Step 1 of {TOTAL_STEPS}")
         self._reset_content()
         self._add_wrapping_label(
             f"Number of additional headings (after the {len(FIXED_HEADINGS)} fixed ones):",
@@ -540,6 +642,7 @@ class App:
 
     def show_step2(self) -> None:
         """Step 2: ask for the title of user heading number current_index+1 (of N)."""
+        self.progress_var.set(f"Step 2 of {TOTAL_STEPS}")
         self._reset_content()
         total = self.heading_count
         index = self.current_index
@@ -583,6 +686,7 @@ class App:
 
     def show_step3(self) -> None:
         """Step 3: summary (additional / fixed / total headings) + Generate button."""
+        self.progress_var.set(f"Step 3 of {TOTAL_STEPS}")
         self._reset_content()
         fixed = len(FIXED_HEADINGS)
         summary = (

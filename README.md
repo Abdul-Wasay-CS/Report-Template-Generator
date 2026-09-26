@@ -2,9 +2,9 @@
 
 A small desktop app that builds a Word template for your DLD lab report. It starts
 with your own cover page, then adds three fixed headings (**Critical Analysis**,
-**Summary of the skills learned**, **Conclusion**) followed by the extra headings you
-type in. Under every heading you get 5 empty lines for screenshots and a small
-A / B / X table. The first heading starts on page 2, so your cover page stays clean.
+**Summary of the skills learned**, **Conclusion** - text only, no table) followed by
+the extra "gate" headings you type in, each with screenshot lines and an A/B/X table.
+The first heading starts on page 2, so your cover page stays clean.
 
 ---
 
@@ -84,6 +84,9 @@ If something goes wrong, look up the message in the **Error Cheat-Sheet** below.
 
 ## 2. App Walkthrough
 
+The window shows a colored "Step X of 3" progress bar at the top at every stage, and a
+status message at the bottom of the window at all times.
+
 *Screenshots to be added. Put your images in a `screenshots/` folder next to
 `main.py`; the links below are placeholders.*
 
@@ -129,7 +132,37 @@ If something goes wrong, look up the message in the **Error Cheat-Sheet** below.
 
 ---
 
-## 3. Error Cheat-Sheet
+## 3. Formatting Reference
+
+This is what the generated `.docx` looks like once opened in Word. Nothing here needs
+to be set by hand - it is applied automatically during generation.
+
+| Element | Font | Size | Style | Notes |
+|---------|------|------|-------|-------|
+| Main headings (the 3 fixed ones: Critical Analysis, Summary of the skills learned, Conclusion) | Aptos Slab Extrabold | 18 pt | — | Text only. **No table** follows a fixed heading. |
+| Body text (the 5 screenshot placeholder lines under every heading) | Calibri (Body) | 12 pt | — | Empty lines - paste your screenshots here. |
+| Gate names (your additional, user-typed headings) | Berlin Sans FB Demi | 28 pt | Bold | Followed by 5 screenshot lines, then the table below. |
+| Table content (header row and value rows) | Times New Roman | 20 pt | — | Only appears under gate (user) headings, never under the 3 fixed ones. |
+
+The table under each gate heading is always 5 rows × 3 columns:
+
+| A | B | X |
+|---|---|---|
+| 0 | 0 |   |
+| 0 | 1 |   |
+| 1 | 0 |   |
+| 1 | 1 |   |
+
+Fill in the empty **X** cells with the output (0 or 1) you observed for each A/B
+combination.
+
+> If a listed font (e.g. **Aptos Slab Extrabold** or **Berlin Sans FB Demi**) is not
+> installed on the computer that opens the document, Word will substitute a similar
+> font automatically; the size and bold settings still apply.
+
+---
+
+## 4. Error Cheat-Sheet
 
 Messages appear either on the start-up error screen (with an **Exit** button), as a red
 inline warning under an input, or in the status line at the bottom of the window.
@@ -152,7 +185,7 @@ inline warning under an input, or in the status line at the bottom of the window
 
 ---
 
-## 4. Customization Guide
+## 5. Customization Guide
 
 **⚠️ WARNING: For advanced users / developers only. Changing these may break the app.**
 
@@ -164,18 +197,24 @@ All options are constants near the top of `main.py`, in the block labelled
 | Fixed headings | `FIXED_HEADINGS` | `Critical Analysis`, `Summary of the skills learned`, `Conclusion` |
 | Limits for additional headings | `MIN_HEADINGS`, `MAX_HEADINGS` | `1`, `100` |
 | Auto-close delay | `AUTO_CLOSE_DELAY_MS` | `1500` |
-| Heading style | `HEADING_STYLE` | `"Heading 1"` |
-| Heading font | `HEADING_FONT_NAME`, `HEADING_FONT_SIZE_PT` | `None` (use the style's font) |
+| Shared heading paragraph style | `HEADING_STYLE` | `"Heading 1"` |
+| Fixed-heading font | `FIXED_HEADING_FONT_NAME`, `FIXED_HEADING_FONT_SIZE_PT`, `FIXED_HEADING_BOLD` | Aptos Slab Extrabold, 18, `None` |
+| Gate-heading font | `GATE_HEADING_FONT_NAME`, `GATE_HEADING_FONT_SIZE_PT`, `GATE_HEADING_BOLD` | Berlin Sans FB Demi, 28, `True` |
+| Body text font | `BODY_FONT_NAME`, `BODY_FONT_SIZE_PT` | Calibri (Body), 12 |
+| Table font | `TABLE_FONT_NAME`, `TABLE_FONT_SIZE_PT` | Times New Roman, 20 |
 | Table style | `TABLE_STYLE` | `"Table Grid"` |
-| Table font | `TABLE_FONT_NAME`, `TABLE_FONT_SIZE_PT` | `None` |
 | Screenshot placeholders | `SCREENSHOT_PLACEHOLDER_COUNT` | `5` |
 | Table size and A/B presets | `TABLE_ROWS` | 5 rows × 3 columns |
+| GUI color palette | `COLOR_BG`, `COLOR_CARD_BG`, `COLOR_TEXT`, `COLOR_PRIMARY`, `COLOR_PRIMARY_DARK`, `COLOR_PRIMARY_TEXT` | soft blue/steel theme |
 
-### Fixed headings
+### Fixed headings vs. gate headings
 
-`FIXED_HEADINGS` is the list of headings placed at the start of every document, in
-order, before the headings typed by the user. They get exactly the same treatment
-(heading style, screenshot lines, table). Example:
+`FIXED_HEADINGS` lists the headings placed at the start of every document, in order,
+before the headings typed by the user. Fixed headings get **only** a heading paragraph
+and the screenshot placeholder lines - no table. Every heading typed by the user (a
+"gate" heading) always gets a table in addition to those two things. This split is not
+configurable by a flag; it follows directly from the position in `FIXED_HEADINGS` vs.
+`user_titles` inside `build_document_content()`.
 
 ```python
 FIXED_HEADINGS = [
@@ -189,6 +228,15 @@ The number typed in Step 1 counts only the additional headings, so the final doc
 contains `len(FIXED_HEADINGS)` + your count. The Step 1 label and the Step 3 summary
 adapt automatically if you change the list.
 
+### Fonts
+
+Each of the four text roles (fixed heading, gate heading, body, table) has its own
+`*_FONT_NAME` / `*_FONT_SIZE_PT` constant, matching the **Formatting Reference** table
+above. `GATE_HEADING_BOLD` and `FIXED_HEADING_BOLD` control bold specifically; the
+other roles have no bold override. Setting any `*_BOLD` constant to `None` leaves bold
+exactly as the underlying Word style defines it. The chosen font must be installed on
+whichever computer later opens the document, or Word will substitute a similar one.
+
 ### Cover page break
 
 The first heading of the document is given Word's "Page break before" property inside
@@ -201,19 +249,6 @@ controlled by a constant.
 After a successful save the window closes after `AUTO_CLOSE_DELAY_MS` milliseconds (long
 enough to see the `Saved: <path>` message). Set it to `0` to close immediately. On
 failure the window always stays open.
-
-### Heading style
-
-`HEADING_STYLE = "Heading 1"` is looked up in `cover.docx`. Its appearance comes from
-that file: in Word, right-click **Heading 1** in the Styles gallery → **Modify**, then
-save `cover.docx`. If the style is not stored in `cover.docx`, the app creates a simple
-one (bold, 16 pt) so headings still work. You can also force a font without touching
-Word:
-
-```python
-HEADING_FONT_NAME = "Times New Roman"
-HEADING_FONT_SIZE_PT = 14
-```
 
 ### Table style
 
@@ -266,14 +301,17 @@ TABLE_ROWS = [
 
 Rename the column labels (for example `Y` instead of `X`) by editing the first row.
 
-### Fonts
+### GUI color theme
 
-Use the four `*_FONT_NAME` / `*_FONT_SIZE_PT` constants. The font must be installed on the
-computer that opens the document. `None` means "do not override".
+`COLOR_BG`, `COLOR_CARD_BG`, `COLOR_TEXT`, `COLOR_PRIMARY`, `COLOR_PRIMARY_DARK`, and
+`COLOR_PRIMARY_TEXT` are applied once, in `App._apply_theme()`, across the whole window
+(background, buttons, entries/spinboxes, and the "Step X of 3" progress bar). Edit the
+hex values to change the palette; `ERROR_COLOR` and `OK_COLOR` for warnings/success stay
+separate on purpose, so problems remain readable regardless of the chosen theme.
 
 ---
 
-## 5. Advanced / Dependency Reference
+## 6. Advanced / Dependency Reference
 
 **For Arch Linux and advanced/custom setups.**
 Raw dependencies for people who want to manage them manually. This is **not** part of the
@@ -284,7 +322,7 @@ normal install path — normal users should skip this section and use Section 1.
 | Dependency | Notes |
 |------------|-------|
 | Python 3.9 or newer | Standard-library modules used: `re`, `shutil`, `sys`, `pathlib`, `tkinter` |
-| Tcl/Tk with the `tkinter` module (including `ttk`) | Usually a separate system package on Linux |
+| Tcl/Tk with the `tkinter` module (including `ttk`) | Usually a separate system package on Linux. The app uses ttk's built-in `"clam"` theme as the base for its color palette |
 | `python-docx` (PyPI name `python-docx`) | Written against the 1.x API. Pulls in `lxml` and `typing_extensions` |
 
 > Do not confuse `python-docx` with the unrelated PyPI package `docx`. The app imports
