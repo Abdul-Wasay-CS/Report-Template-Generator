@@ -1,20 +1,32 @@
 """
 main.py - DLD Lab Word Template Generator
 
-A single-window Tkinter (ttk) desktop app that walks the user through three steps:
-    Step 1: choose how many ADDITIONAL (gate) headings the report needs (1-100). These
-            come after the 3 fixed headings that every report contains.
-    Step 2: type a title for each additional heading, one at a time
-    Step 3: generate a .docx by copying cover_page/cover.docx and appending, in order:
-              - the 3 FIXED headings (Critical Analysis, Summary of the skills learned,
-                Conclusion) - each gets only a heading paragraph + 5 screenshot
-                placeholder lines. NO table.
-              - the user's additional ("gate") headings - each gets a heading
-                paragraph + 5 screenshot placeholder lines + a 5x3 A/B/X table.
-            The first heading starts on a new page (page 2) so nothing shares the
-            cover page. Specific fonts/sizes are applied to fixed headings, gate
-            headings, body placeholder text, and table content (see CONFIGURATION).
-            After a successful save the app closes itself; on failure it stays open.
+A single-window Tkinter (ttk) desktop app with up to three steps:
+
+    Step 1 (Headings): the user optionally includes 3 fixed headings, then adds any
+        number of their own ("gate") headings one at a time. Each gate heading can
+        optionally get an auto-generated truth table (1-7 inputs). A live list shows
+        everything added so far; "Back" removes the most recently added heading;
+        "Finish Headings" ends the step (at least one heading is required).
+
+    Step 2 (F-value selection) - SKIPPED entirely if no added heading uses a truth
+        table. Shown once per truth-table heading, in order: the user picks whether
+        that heading's output ("F") column is filled with all 1s or all 0s.
+
+    Step 3 (Generate): summary + Generate button. Builds the .docx by copying
+        cover_page/cover.docx and appending, in order:
+            1. "Summary of the skills learned" (fixed, if enabled)
+            2. "Conclusion" (fixed, if enabled)
+            3. the user's gate headings, in the order entered, each with a truth
+               table if one was requested
+            4. "Critical Analysis" (fixed, if enabled) - always last
+        Fixed headings get only a heading paragraph + 5 screenshot placeholder lines
+        (no table). The very first heading in the document starts on page 2, so
+        nothing is added to the cover page itself.
+        After a successful save the app closes itself; on failure it stays open.
+
+The progress indicator at the top reads "Step X of N", where N is 2 when no truth
+table was requested, or 3 when at least one was.
 
 Dependencies: python-docx, tkinter (with ttk).
 """
@@ -63,19 +75,24 @@ BASE_DIR = Path(__file__).resolve().parent
 COVER_PATH = BASE_DIR / "cover_page" / "cover.docx"
 COVER_DISPLAY = "cover_page/cover.docx"      # short form used in messages
 
-# Headings that appear at the start of EVERY generated document, in this exact order,
-# before any heading typed by the user. Unlike user headings, these get NO table -
-# only the heading paragraph and the screenshot placeholder lines.
-FIXED_HEADINGS = [
-    "Critical Analysis",
-    "Summary of the skills learned",
-    "Conclusion",
-]
+# The 3 optional fixed headings. "Summary" and "Conclusion" are inserted BEFORE the
+# user's own headings (in this order); "Critical Analysis" is inserted at the very end
+# of the document, after every user heading. All three get only a heading paragraph +
+# the screenshot placeholder lines - never a truth table.
+FIXED_HEADING_SUMMARY = "Summary of the skills learned"
+FIXED_HEADING_CONCLUSION = "Conclusion"
+FIXED_HEADING_CRITICAL = "Critical Analysis"
 
-# Allowed range for the number of ADDITIONAL (user-defined / "gate") headings. The
-# fixed headings above are not counted here.
-MIN_HEADINGS = 1
-MAX_HEADINGS = 100
+# Allowed range for the number of inputs (A, B, C, ...) in a generated truth table.
+# 7 inputs -> 2**7 = 128 rows, the largest table the app will build.
+MIN_TRUTH_TABLE_INPUTS = 1
+MAX_TRUTH_TABLE_INPUTS = 7
+
+# Letters used for truth-table input columns, in order, skipping 'F' because 'F' is
+# permanently reserved for the output column (so the output header is always "F", no
+# matter how many inputs there are or which letters they use).
+INPUT_LETTER_POOL = "ABCDEGHIJKLMNOPQRSTUVWXYZ"
+OUTPUT_COLUMN_LETTER = "F"
 
 # After a successful save, the window closes after this many milliseconds. The short
 # delay lets the "Saved: <path>" status message actually be drawn before the window
@@ -106,26 +123,16 @@ SCREENSHOT_PLACEHOLDER_COUNT = 5
 # --- Formatting: table content (both the header row and the value rows) --------------
 TABLE_FONT_NAME = "Times New Roman"
 TABLE_FONT_SIZE_PT = 20
+TABLE_BOLD = True
 
 # Table style name. Must exist in cover.docx; if it does not, plain black borders are
 # drawn instead. Use None for "no style, no borders". Applies only to user ("gate")
-# headings - fixed headings never get a table.
+# headings that requested a truth table - fixed headings never get a table.
 TABLE_STYLE = "Table Grid"
-
-# Table contents: first row is the header, remaining rows are the A/B presets with an
-# empty X column to be filled in by the student. Table dimensions are derived from this
-# list (5 rows x 3 columns by default). Every row must have the same number of cells.
-TABLE_ROWS = [
-    ["A", "B", "X"],
-    ["0", "0", ""],
-    ["0", "1", ""],
-    ["1", "0", ""],
-    ["1", "1", ""],
-]
 
 # --- GUI color theme (ttk "clam" base, customised) -------------------------------------
 COLOR_BG = "#eef3f8"            # window / frame background
-COLOR_CARD_BG = "#ffffff"       # entry / spinbox field background
+COLOR_CARD_BG = "#ffffff"       # entry / spinbox / listbox field background
 COLOR_TEXT = "#1b2733"          # normal label text
 COLOR_PRIMARY = "#2f6690"       # buttons, progress bar
 COLOR_PRIMARY_DARK = "#1b4964"  # buttons when pressed/active
@@ -245,14 +252,34 @@ def apply_font(paragraph, font_name, size_pt, bold=None) -> None:
         apply_font_to_run(run, font_name, size_pt, bold)
 
 
-def add_heading_block(doc, title: str, is_fixed: bool, start_on_new_page: bool = False) -> None:
+def build_truth_table_rows(input_count: int, f_value: str) -> list[list[str]]:
+    """
+    Build the full set of rows for a truth table with `input_count` inputs (1-7).
+
+    Row 1 (header): the first `input_count` letters of INPUT_LETTER_POOL, followed by
+    the fixed output header "F". Every remaining row is one binary combination of the
+    inputs, in ascending order (2**input_count rows total), followed by `f_value`
+    ("1" or "0") repeated in every row's output cell.
+    """
+    letters = list(INPUT_LETTER_POOL[:input_count])
+    header = letters + [OUTPUT_COLUMN_LETTER]
+    rows = [header]
+    for combo in range(2 ** input_count):
+        bits = format(combo, f"0{input_count}b")       # e.g. "011" for combo=3, width 3
+        rows.append(list(bits) + [f_value])
+    return rows
+
+
+def add_heading_block(
+    doc, title: str, is_fixed: bool, table_rows: list[list[str]] | None, start_on_new_page: bool
+) -> None:
     """
     Append one complete section to the document.
 
     Fixed headings (is_fixed=True): heading paragraph + screenshot placeholder lines.
-        NO table.
+        table_rows is ignored - fixed headings never get a table.
     User / "gate" headings (is_fixed=False): heading paragraph + screenshot placeholder
-        lines + a 5x3 A/B/X table.
+        lines, plus a truth table built from table_rows when it is not None.
 
     start_on_new_page: when True the heading paragraph gets Word's "Page break before"
     property. Used for the very first heading so it always begins on page 2, with
@@ -275,41 +302,46 @@ def add_heading_block(doc, title: str, is_fixed: bool, start_on_new_page: bool =
         run = placeholder.add_run("")
         apply_font_to_run(run, BODY_FONT_NAME, BODY_FONT_SIZE_PT)
 
-    # 3. Truth table - user ("gate") headings only.
-    if not is_fixed:
-        table = doc.add_table(rows=len(TABLE_ROWS), cols=len(TABLE_ROWS[0]))
+    # 3. Truth table - only for non-fixed headings that requested one.
+    if not is_fixed and table_rows:
+        table = doc.add_table(rows=len(table_rows), cols=len(table_rows[0]))
         apply_table_style(table)
-        for r_index, row_values in enumerate(TABLE_ROWS):
+        for r_index, row_values in enumerate(table_rows):
             for c_index, value in enumerate(row_values):
                 cell = table.cell(r_index, c_index)
                 cell.text = value
                 for paragraph in cell.paragraphs:
-                    apply_font(paragraph, TABLE_FONT_NAME, TABLE_FONT_SIZE_PT)
+                    apply_font(paragraph, TABLE_FONT_NAME, TABLE_FONT_SIZE_PT, TABLE_BOLD)
 
 
-def build_document_content(doc, user_titles: list[str]) -> None:
+def build_document_content(doc, fixed_enabled: bool, headings: list[dict]) -> None:
     """
-    Validate the table configuration, then append one block per heading, in order:
-    first the FIXED_HEADINGS (no table), then the user's additional "gate" headings
-    (each with a table). The first block starts on a new page so the cover page stays
-    clean.
+    Append every section of the report, in the required order:
+        1. "Summary of the skills learned" (fixed, if fixed_enabled)
+        2. "Conclusion" (fixed, if fixed_enabled)
+        3. each entry of `headings`, in order, with its truth table if it has one
+        4. "Critical Analysis" (fixed, if fixed_enabled) - always last
+
+    Each heading dict has keys: "title" (str), "truth_table" (bool), "input_count"
+    (int or None), "f_value" ("1"/"0" or None). The first block overall starts on a new
+    page so the cover page stays clean.
     """
-    columns = len(TABLE_ROWS[0]) if TABLE_ROWS else 0
-    if columns == 0 or any(len(row) != columns for row in TABLE_ROWS):
-        raise GenerationError(
-            "TABLE_ROWS in main.py is misconfigured: it must be non-empty and every "
-            "row must have the same number of cells."
-        )
     ensure_heading_style(doc)
 
-    fixed_count = len(FIXED_HEADINGS)
-    all_titles = list(FIXED_HEADINGS) + list(user_titles)
-    for position, title in enumerate(all_titles):
-        add_heading_block(
-            doc, title,
-            is_fixed=(position < fixed_count),
-            start_on_new_page=(position == 0),
-        )
+    blocks: list[tuple[str, bool, list[list[str]] | None]] = []
+    if fixed_enabled:
+        blocks.append((FIXED_HEADING_SUMMARY, True, None))
+        blocks.append((FIXED_HEADING_CONCLUSION, True, None))
+    for heading in headings:
+        rows = None
+        if heading["truth_table"]:
+            rows = build_truth_table_rows(heading["input_count"], heading["f_value"])
+        blocks.append((heading["title"], False, rows))
+    if fixed_enabled:
+        blocks.append((FIXED_HEADING_CRITICAL, True, None))
+
+    for position, (title, is_fixed, rows) in enumerate(blocks):
+        add_heading_block(doc, title, is_fixed, rows, start_on_new_page=(position == 0))
 
 
 def _remove_quietly(path: str) -> None:
@@ -320,12 +352,9 @@ def _remove_quietly(path: str) -> None:
         pass
 
 
-def generate_document(out_path: str, user_titles: list[str]) -> None:
+def generate_document(out_path: str, fixed_enabled: bool, headings: list[dict]) -> None:
     """
     Create the report template at out_path.
-
-    user_titles are the ADDITIONAL ("gate") headings typed in Step 2; the fixed
-    headings are added automatically in front of them.
 
     Steps: check the cover exists -> shutil.copy it to out_path -> open the copy with
     python-docx -> append the heading blocks -> save.
@@ -365,8 +394,8 @@ def generate_document(out_path: str, user_titles: list[str]) -> None:
                 f".docx file ({type(exc).__name__}: {exc})."
             ) from exc
 
-        # Append the per-heading content (fixed headings first, then the user's).
-        build_document_content(doc, user_titles)
+        # Append every section, in the fixed + user order described above.
+        build_document_content(doc, fixed_enabled, headings)
 
         # Save in place.
         try:
@@ -384,22 +413,22 @@ def generate_document(out_path: str, user_titles: list[str]) -> None:
 # INPUT VALIDATION (pure functions, no GUI)
 # ======================================================================================
 
-def parse_heading_count(text: str):
+def parse_input_count(text: str):
     """
-    Validate the Step 1 input (number of additional headings).
+    Validate the "Number of inputs" field for one heading's truth table.
     Returns (value, None) when valid, or (None, warning_message) when invalid.
     Only plain ASCII digits are accepted: no signs, decimals, spaces inside, or letters.
     """
     cleaned = text.strip()
     if not cleaned:
-        return None, f"Enter a whole number from {MIN_HEADINGS} to {MAX_HEADINGS}."
+        return None, f"Enter a whole number of inputs from {MIN_TRUTH_TABLE_INPUTS} to {MAX_TRUTH_TABLE_INPUTS}."
     if not re.fullmatch(r"[0-9]+", cleaned):
         return None, "Digits only - no letters, decimals or signs."
-    if len(cleaned) > 9:                       # avoid absurdly long numbers
-        return None, f"Number must be between {MIN_HEADINGS} and {MAX_HEADINGS}."
+    if len(cleaned) > 3:                       # avoid absurdly long numbers
+        return None, f"Number of inputs must be between {MIN_TRUTH_TABLE_INPUTS} and {MAX_TRUTH_TABLE_INPUTS}."
     value = int(cleaned)
-    if value < MIN_HEADINGS or value > MAX_HEADINGS:
-        return None, f"Number must be between {MIN_HEADINGS} and {MAX_HEADINGS}."
+    if value < MIN_TRUTH_TABLE_INPUTS or value > MAX_TRUTH_TABLE_INPUTS:
+        return None, f"Number of inputs must be between {MIN_TRUTH_TABLE_INPUTS} and {MAX_TRUTH_TABLE_INPUTS}."
     return value, None
 
 
@@ -407,45 +436,49 @@ def parse_heading_count(text: str):
 # GUI
 # ======================================================================================
 
-TOTAL_STEPS = 3  # used only for the "Step X of 3" progress label
-
-
 class App:
     """
-    Single-window wizard. The top area ("content") is cleared and rebuilt for each step;
-    a persistent progress label sits above it and a persistent status label sits below.
+    Single-window wizard. The top area ("content") is cleared and rebuilt for each
+    screen; a persistent progress label sits above it and a persistent status label
+    sits below. Step numbering is dynamic: 2 steps total if no heading requested a
+    truth table, 3 if at least one did (an extra "F-value selection" screen appears,
+    once per truth-table heading, between the headings screen and Generate).
     """
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.heading_count = None          # int once Step 1 has been passed (user headings only)
-        self.titles: list[str] = []        # one entry per user heading ("" = not entered yet)
-        self.current_index = 0             # 0-based user heading being edited in Step 2
         self.fatal = False                 # True when a start-up error stopped the app
-        self.step3_buttons: list = []      # Step 3 buttons, disabled while auto-closing
+
+        # --- Step 1 (headings) state ---
+        self.headings: list[dict] = []     # [{"title", "truth_table", "input_count", "f_value"}]
+
+        # --- Step 2 (F-value selection) state ---
+        self.f_selection_order: list[int] = []   # indices into self.headings needing a table
+        self.f_current_pos = 0                   # position within f_selection_order
+
+        self.generate_buttons: list = []   # Generate-step buttons, disabled while auto-closing
 
         # Window setup: resizable, with a sensible minimum size.
         root.title("DLD Lab Word Template Generator")
-        root.geometry("560x300")
-        root.minsize(440, 260)
+        root.geometry("600x480")
+        root.minsize(480, 380)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(1, weight=1)     # content area grows; progress/separator/status don't
         root.configure(background=COLOR_BG)
 
         self._apply_theme()
 
-        # Persistent progress indicator ("Step X of 3"), above the content area.
+        # Persistent progress indicator ("Step X of N"), above the content area.
         self.progress_var = tk.StringVar(value="")
         self.progress_label = ttk.Label(
             root, textvariable=self.progress_var, style="Progress.TLabel", anchor="w"
         )
         self.progress_label.grid(row=0, column=0, sticky="ew")
 
-        # Content area (swapped per step).
+        # Content area (swapped per screen).
         self.content = ttk.Frame(root, padding=16)
         self.content.grid(row=1, column=0, sticky="nsew")
         self.content.columnconfigure(0, weight=1)
-        self.content.rowconfigure(9, weight=1)   # spacer row pushes buttons (row 10) down
 
         # Separator + single status label at the bottom of the window.
         ttk.Separator(root, orient="horizontal").grid(row=2, column=0, sticky="ew")
@@ -462,7 +495,7 @@ class App:
         if problem:
             self.show_fatal(problem)
         else:
-            self.show_step1()
+            self.show_step_headings()
 
     # ---------------------------------------------------------------- theming ---------
 
@@ -482,6 +515,10 @@ class App:
         style.configure("TFrame", background=COLOR_BG)
         style.configure("TLabel", background=COLOR_BG, foreground=COLOR_TEXT)
         style.configure("TSeparator", background=COLOR_PRIMARY)
+        style.configure("TCheckbutton", background=COLOR_BG, foreground=COLOR_TEXT)
+        style.map("TCheckbutton", background=[("active", COLOR_BG)])
+        style.configure("TRadiobutton", background=COLOR_BG, foreground=COLOR_TEXT)
+        style.map("TRadiobutton", background=[("active", COLOR_BG)])
 
         style.configure(
             "TButton", background=COLOR_PRIMARY, foreground=COLOR_PRIMARY_TEXT,
@@ -491,6 +528,13 @@ class App:
             "TButton",
             background=[("active", COLOR_PRIMARY_DARK), ("disabled", "#a9b7c4")],
             foreground=[("disabled", "#e7edf3")],
+        )
+
+        # A visually smaller variant, used for "Finish Headings" (small, not wide).
+        style.configure("Small.TButton", padding=(8, 2), font=("TkDefaultFont", 9))
+        style.map(
+            "Small.TButton",
+            background=[("active", COLOR_PRIMARY_DARK), ("disabled", "#a9b7c4")],
         )
 
         style.configure("TEntry", fieldbackground=COLOR_CARD_BG, foreground=COLOR_TEXT)
@@ -522,17 +566,24 @@ class App:
         color = {"error": ERROR_COLOR, "ok": OK_COLOR}.get(kind, COLOR_TEXT)
         self.status_label.configure(text=text, foreground=color)
 
+    def _total_steps(self) -> int:
+        """3 if any heading added so far requested a truth table, else 2."""
+        return 3 if any(h["truth_table"] for h in self.headings) else 2
+
+    def _set_progress(self, step_number: int) -> None:
+        self.progress_var.set(f"Step {step_number} of {self._total_steps()}")
+
     def _reset_content(self) -> None:
-        """Destroy the widgets of the current step and clear the status line."""
+        """Destroy the widgets of the current screen and clear the status line."""
         for child in self.content.winfo_children():
             child.destroy()
-        self.step3_buttons = []
+        self.generate_buttons = []
         self.set_status("")
 
     def _add_wrapping_label(self, text: str, row: int, foreground: str = "") -> ttk.Label:
         """
         Create a left-aligned label whose text re-wraps to the width of the window.
-        Used for longer texts (Step 1 prompt, fatal error message).
+        Used for longer texts (instructions, fatal error message).
         """
         options = {"text": text, "justify": "left"}
         if foreground:
@@ -552,10 +603,10 @@ class App:
         label.grid(row=row, column=0, sticky="w", pady=(4, 0))
         return var
 
-    def _add_buttons(self, specs):
-        """Place right-aligned buttons at the bottom of the content area. specs = [(text, command)]."""
+    def _add_nav_buttons(self, row: int, specs):
+        """Place right-aligned Back/Next-style buttons at the given content row."""
         frame = ttk.Frame(self.content)
-        frame.grid(row=10, column=0, sticky="e", pady=(12, 0))
+        frame.grid(row=row, column=0, sticky="e", pady=(12, 0))
         buttons = []
         for column, (text, command) in enumerate(specs):
             button = ttk.Button(frame, text=text, command=command)
@@ -576,136 +627,265 @@ class App:
         self.progress_var.set("Setup Error")
         self._reset_content()
         self._add_wrapping_label(message, row=0, foreground=ERROR_COLOR)
-        exit_button, = self._add_buttons([("Exit", self.root.destroy)])
+        exit_button, = self._add_nav_buttons(1, [("Exit", self.root.destroy)])
         exit_button.focus_set()
         self.set_status("Fatal error - the application cannot continue. Click Exit to close.", "error")
 
-    # ------------------------------------------------------------------ Step 1 -------
+    # ---------------------------------------------------- Step 1: headings entry ------
 
-    def show_step1(self) -> None:
-        """Step 1: ask for the number of ADDITIONAL headings (integer 1-100)."""
-        self.progress_var.set(f"Step 1 of {TOTAL_STEPS}")
+    def show_step_headings(self) -> None:
+        """
+        Step 1: optional fixed-headings checkbox, a form to add one heading at a time
+        (with an optional truth table), a live list of headings added so far, a
+        "Back" button that removes the last added heading, and a small
+        "Finish Headings" button that advances past this step.
+        """
+        self._set_progress(1)
         self._reset_content()
-        self._add_wrapping_label(
-            f"Number of additional headings (after the {len(FIXED_HEADINGS)} fixed ones):",
-            row=0,
+        self.content.rowconfigure(8, weight=1)   # the live-list row grows with the window
+
+        # --- Fixed headings checkbox (persists across Add/Remove within this screen) --
+        if not hasattr(self, "fixed_var"):
+            self.fixed_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            self.content, text="Include 3 fixed headings", variable=self.fixed_var,
+            command=lambda: self._set_progress(1),
+        ).grid(row=0, column=0, sticky="w")
+
+        ttk.Separator(self.content, orient="horizontal").grid(row=1, column=0, sticky="ew", pady=8)
+
+        # --- "Add a heading" form ---
+        ttk.Label(self.content, text="Heading title:").grid(row=2, column=0, sticky="w")
+        if not hasattr(self, "new_title_var"):
+            self.new_title_var = tk.StringVar(value="")
+        self.new_title_entry = ttk.Entry(self.content, textvariable=self.new_title_var)
+        self.new_title_entry.grid(row=3, column=0, sticky="ew", pady=(2, 6))
+        self.new_title_entry.focus_set()
+
+        if not hasattr(self, "new_table_var"):
+            self.new_table_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self.content, text="Include truth table", variable=self.new_table_var,
+            command=self._on_truth_table_toggle,
+        ).grid(row=4, column=0, sticky="w")
+
+        inputs_row = ttk.Frame(self.content)
+        inputs_row.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(inputs_row, text=f"Number of inputs ({MIN_TRUTH_TABLE_INPUTS}-{MAX_TRUTH_TABLE_INPUTS}):").grid(
+            row=0, column=0, sticky="w"
         )
-
-        # Pre-fill with the stored count when returning from Step 2 ("preserve if valid").
-        initial = str(self.heading_count) if self.heading_count else str(MIN_HEADINGS)
-        self.count_var = tk.StringVar(value=initial)
-
-        # Warning label is created BEFORE the spinbox because the key-validation
-        # callbacks below write to it.
-        self.count_warning = self._add_warning_label(row=2)
-
-        # Key-level validation: only up to 3 ASCII digits can be typed/pasted.
-        vcmd = (self.root.register(self._on_count_key), "%P")
-        icmd = (self.root.register(self._on_count_key_rejected),)
-        self.count_spin = ttk.Spinbox(
-            self.content, from_=MIN_HEADINGS, to=MAX_HEADINGS, increment=1, width=8,
-            textvariable=self.count_var,
-            validate="key", validatecommand=vcmd, invalidcommand=icmd,
+        if not hasattr(self, "new_inputs_var"):
+            self.new_inputs_var = tk.StringVar(value=str(MIN_TRUTH_TABLE_INPUTS))
+        vcmd = (self.root.register(self._on_inputs_key), "%P")
+        self.new_inputs_spin = ttk.Spinbox(
+            inputs_row, from_=MIN_TRUTH_TABLE_INPUTS, to=MAX_TRUTH_TABLE_INPUTS, increment=1,
+            width=6, textvariable=self.new_inputs_var, validate="key", validatecommand=vcmd,
         )
-        self.count_spin.grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.count_spin.bind("<Return>", lambda event: self.on_step1_next())
-        self.count_spin.focus_set()
+        self.new_inputs_spin.grid(row=0, column=1, padx=(6, 0))
+        self._on_truth_table_toggle()     # enable/disable the spinbox to match the checkbox
 
-        self._add_buttons([("Next", self.on_step1_next)])    # no Back button on Step 1
+        self.heading_warning = self._add_warning_label(row=6)
 
-    def _on_count_key(self, proposed: str) -> bool:
+        add_remove_row = ttk.Frame(self.content)
+        add_remove_row.grid(row=7, column=0, sticky="w", pady=(6, 10))
+        self.remove_last_button = ttk.Button(add_remove_row, text="Back", command=self.on_remove_last_heading)
+        self.remove_last_button.grid(row=0, column=0)
+        self.add_heading_button = ttk.Button(add_remove_row, text="Add Heading", command=self.on_add_heading)
+        self.add_heading_button.grid(row=0, column=1, padx=(6, 0))
+
+        # --- Live list of headings added so far ---
+        ttk.Label(self.content, text="Headings added so far:").grid(row=8 - 1, column=0, sticky="w")
+        list_frame = ttk.Frame(self.content)
+        list_frame.grid(row=8, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self.headings_listbox = tk.Listbox(
+            list_frame, height=6, background=COLOR_CARD_BG, foreground=COLOR_TEXT,
+            borderwidth=1, highlightthickness=1, highlightbackground=COLOR_PRIMARY,
+            selectbackground=COLOR_PRIMARY, selectforeground=COLOR_PRIMARY_TEXT,
+        )
+        self.headings_listbox.grid(row=0, column=0, sticky="nsew")
+
+        # --- "Finish Headings": small, right-aligned, not a full-width button ---
+        finish_row = ttk.Frame(self.content)
+        finish_row.grid(row=9, column=0, sticky="e", pady=(10, 0))
+        self.finish_button = ttk.Button(
+            finish_row, text="Finish Headings", style="Small.TButton", command=self.on_finish_headings
+        )
+        self.finish_button.grid(row=0, column=0)
+
+        self._refresh_headings_list()
+
+    def _on_truth_table_toggle(self) -> None:
+        """Enable the "number of inputs" spinbox only when the truth-table box is ticked."""
+        if self.new_table_var.get():
+            self.new_inputs_spin.state(["!disabled"])
+        else:
+            self.new_inputs_spin.state(["disabled"])
+        self.heading_warning.set("")
+
+    def _on_inputs_key(self, proposed: str) -> bool:
         """validatecommand: allow the edit only if the result is empty or 1-3 ASCII digits."""
         allowed = re.fullmatch(r"[0-9]{0,3}", proposed) is not None
         if allowed:
-            self.count_warning.set("")
+            self.heading_warning.set("")
         return allowed
 
-    def _on_count_key_rejected(self) -> None:
-        """invalidcommand: tell the user why the keystroke was ignored."""
-        self.count_warning.set("Only whole numbers are allowed (digits 0-9, up to 3 digits).")
-
-    def on_step1_next(self) -> None:
-        """Validate the count; advance to Step 2 only if valid."""
-        value, warning = parse_heading_count(self.count_var.get())
-        if warning:
-            self.count_warning.set(warning)
-            return
-        self.count_warning.set("")
-
-        # Resize the title list to the new count, keeping titles already typed.
-        self.titles = self.titles[:value] + [""] * (value - len(self.titles))
-        self.heading_count = value
-        self.current_index = 0
-        self.show_step2()
-
-    # ------------------------------------------------------------------ Step 2 -------
-
-    def show_step2(self) -> None:
-        """Step 2: ask for the title of user heading number current_index+1 (of N)."""
-        self.progress_var.set(f"Step 2 of {TOTAL_STEPS}")
-        self._reset_content()
-        total = self.heading_count
-        index = self.current_index
-        ttk.Label(
-            self.content, text=f"Heading {index + 1} of {total} \u2014 enter title:"
-        ).grid(row=0, column=0, sticky="w")
-
-        # Pre-fill with any previously entered title for this heading.
-        self.title_var = tk.StringVar(value=self.titles[index])
-        self.title_entry = ttk.Entry(self.content, textvariable=self.title_var)
-        self.title_entry.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        self.title_entry.bind("<Return>", lambda event: self.on_step2_next())
-        self.title_entry.focus_set()
-        self.title_entry.icursor("end")
-
-        self.title_warning = self._add_warning_label(row=2)
-        self._add_buttons([("Back", self.on_step2_back), ("Next", self.on_step2_next)])
-
-    def on_step2_back(self) -> None:
-        """Return to Step 1. A non-blank title being typed is kept for later."""
-        typed = self.title_var.get().strip()
-        if typed:
-            self.titles[self.current_index] = typed
-        self.show_step1()
-
-    def on_step2_next(self) -> None:
-        """Validate the title (non-empty), store it, and move on (Step 3 after the last one)."""
-        title = self.title_var.get().strip()
-        if not title:
-            self.title_warning.set("Title cannot be empty.")
-            return
-        self.titles[self.current_index] = title
-
-        if self.current_index < self.heading_count - 1:
-            self.current_index += 1
-            self.show_step2()
+    def _refresh_headings_list(self) -> None:
+        """Redraw the live list box from self.headings and update button states/progress."""
+        self.headings_listbox.delete(0, tk.END)
+        for index, heading in enumerate(self.headings, start=1):
+            if heading["truth_table"]:
+                detail = f"Truth table: Yes ({heading['input_count']} inputs)"
+            else:
+                detail = "Truth table: No"
+            self.headings_listbox.insert(tk.END, f"{index}. {heading['title']}  \u2014  {detail}")
+        if self.headings:
+            self.remove_last_button.state(["!disabled"])
         else:
-            self.show_step3()
+            self.remove_last_button.state(["disabled"])
+        self._set_progress(1)
 
-    # ------------------------------------------------------------------ Step 3 -------
+    def on_add_heading(self) -> None:
+        """Validate the form and append a new heading to self.headings."""
+        title = self.new_title_var.get().strip()
+        if not title:
+            self.heading_warning.set("Title cannot be empty.")
+            return
 
-    def show_step3(self) -> None:
-        """Step 3: summary (additional / fixed / total headings) + Generate button."""
-        self.progress_var.set(f"Step 3 of {TOTAL_STEPS}")
+        include_table = self.new_table_var.get()
+        input_count = None
+        if include_table:
+            input_count, warning = parse_input_count(self.new_inputs_var.get())
+            if warning:
+                self.heading_warning.set(warning)
+                return
+
+        self.headings.append({
+            "title": title,
+            "truth_table": include_table,
+            "input_count": input_count,
+            "f_value": None,
+        })
+        self.heading_warning.set("")
+
+        # Reset the form for the next heading (fixed-headings checkbox is untouched).
+        self.new_title_var.set("")
+        self.new_table_var.set(False)
+        self.new_inputs_var.set(str(MIN_TRUTH_TABLE_INPUTS))
+        self._on_truth_table_toggle()
+        self.new_title_entry.focus_set()
+
+        self._refresh_headings_list()
+
+    def on_remove_last_heading(self) -> None:
+        """"Back": remove the most recently added heading, if any."""
+        if self.headings:
+            self.headings.pop()
+            self._refresh_headings_list()
+
+    def on_finish_headings(self) -> None:
+        """Validate at least one heading exists, then move to F-selection or Generate."""
+        if not self.headings:
+            self.heading_warning.set("Add at least one heading before continuing.")
+            return
+        self.heading_warning.set("")
+
+        self.f_selection_order = [i for i, h in enumerate(self.headings) if h["truth_table"]]
+        self.f_current_pos = 0
+        if self.f_selection_order:
+            self.show_step_f_value()
+        else:
+            self.show_step_generate()
+
+    # ------------------------------------------------ Step 2: F-value selection -------
+
+    def show_step_f_value(self) -> None:
+        """
+        One screen per truth-table heading, in order: choose whether its output ("F")
+        column is filled entirely with 1s or entirely with 0s.
+        """
+        self._set_progress(2)
         self._reset_content()
-        fixed = len(FIXED_HEADINGS)
+
+        pos = self.f_current_pos
+        heading_index = self.f_selection_order[pos]
+        heading = self.headings[heading_index]
+        total = len(self.f_selection_order)
+
+        self._add_wrapping_label(
+            f"Heading \u201c{heading['title']}\u201d ({pos + 1} of {total}) \u2014 "
+            "fill its output (F) column with:",
+            row=0,
+        )
+
+        self.f_value_var = tk.StringVar(value=heading["f_value"] or "")
+        options_frame = ttk.Frame(self.content)
+        options_frame.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Radiobutton(
+            options_frame, text="All 1s", value="1", variable=self.f_value_var
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            options_frame, text="All 0s", value="0", variable=self.f_value_var
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        self.f_value_warning = self._add_warning_label(row=2)
+        self._add_nav_buttons(3, [("Back", self.on_f_value_back), ("Next", self.on_f_value_next)])
+
+    def on_f_value_back(self) -> None:
+        """Go to the previous truth-table heading, or back to the headings screen."""
+        if self.f_current_pos > 0:
+            self.f_current_pos -= 1
+            self.show_step_f_value()
+        else:
+            self.show_step_headings()
+
+    def on_f_value_next(self) -> None:
+        """Validate a choice was made, store it, then advance."""
+        value = self.f_value_var.get()
+        if value not in ("1", "0"):
+            self.f_value_warning.set("Select All 1s or All 0s before continuing.")
+            return
+
+        heading_index = self.f_selection_order[self.f_current_pos]
+        self.headings[heading_index]["f_value"] = value
+
+        if self.f_current_pos < len(self.f_selection_order) - 1:
+            self.f_current_pos += 1
+            self.show_step_f_value()
+        else:
+            self.show_step_generate()
+
+    # ---------------------------------------------------------- Step 3: Generate ------
+
+    def show_step_generate(self) -> None:
+        """Final step: summary + Generate button."""
+        self._set_progress(self._total_steps())
+        self._reset_content()
+
+        table_count = sum(1 for h in self.headings if h["truth_table"])
+        fixed_count = 3 if self.fixed_var.get() else 0
         summary = (
-            f"Number of additional headings: {self.heading_count}\n"
-            f"Fixed headings: {fixed}\n"
-            f"Total headings in the document: {fixed + self.heading_count}"
+            f"Fixed headings included: {'Yes' if self.fixed_var.get() else 'No'} ({fixed_count})\n"
+            f"User-defined headings: {len(self.headings)}\n"
+            f"  - with a truth table: {table_count}\n"
+            f"Total headings in the document: {fixed_count + len(self.headings)}"
         )
         ttk.Label(self.content, text=summary, justify="left").grid(row=0, column=0, sticky="w")
 
-        back_button, generate_button = self._add_buttons(
-            [("Back", self.on_step3_back), ("Generate", self.on_generate)]
+        back_button, generate_button = self._add_nav_buttons(
+            1, [("Back", self.on_generate_back), ("Generate", self.on_generate)]
         )
-        self.step3_buttons = [back_button, generate_button]
+        self.generate_buttons = [back_button, generate_button]
         generate_button.focus_set()
 
-    def on_step3_back(self) -> None:
-        """Return to Step 2 at the last user heading."""
-        self.current_index = self.heading_count - 1
-        self.show_step2()
+    def on_generate_back(self) -> None:
+        """Return to the last F-value screen if any were shown, else to the headings screen."""
+        if self.f_selection_order:
+            self.f_current_pos = len(self.f_selection_order) - 1
+            self.show_step_f_value()
+        else:
+            self.show_step_headings()
 
     def schedule_auto_close(self) -> None:
         """
@@ -713,7 +893,7 @@ class App:
         so nothing can be clicked while the (short) delay runs; the delay itself lets
         the success message be drawn before the window goes away.
         """
-        for button in self.step3_buttons:
+        for button in self.generate_buttons:
             button.state(["disabled"])
         self.root.update_idletasks()               # make sure the status text is painted
         if AUTO_CLOSE_DELAY_MS <= 0:
@@ -742,7 +922,7 @@ class App:
             out_path += ".docx"
 
         try:
-            generate_document(out_path, self.titles)
+            generate_document(out_path, self.fixed_var.get(), self.headings)
         except GenerationError as exc:
             self.set_status(str(exc), "error")     # stay open so the error can be read
         except Exception as exc:                   # anything we did not anticipate
